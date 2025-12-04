@@ -31,7 +31,9 @@ video {
 }
 
 #localVideo {
-    transform: scale(-1, 1);
+    /* In screen-sharing-only mode we don't mirror the local preview,
+       so any placeholder text and shared content are readable. */
+    transform: none;
 }
 
 #connectionState {

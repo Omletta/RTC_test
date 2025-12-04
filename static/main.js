@@ -11,89 +11,97 @@ const localMetadata = {};
 // Whether to use trickle-ice which is the default,
 // making call setup faster.
 const useTrickleIce = true;
+const initialHash = window.location.hash.substr(1);
+const isSender = initialHash.length === 0;
 
-// Audio and video muting.
-const audioBtn = document.getElementById('audioBtn');
-audioBtn.addEventListener('click', () => {
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack.enabled) {
-        audioBtn.classList.add('muted');
-    } else {
-        audioBtn.classList.remove('muted');
-    }
-    audioTrack.enabled = !audioTrack.enabled;
-});
-const videoBtn = document.getElementById('videoBtn');
-videoBtn.addEventListener('click', async () => {
-    const videoTrack = localStream.getVideoTracks()[0];
-    if (videoTrack.enabled) {
-        videoBtn.classList.add('muted');
-    } else {
-        videoBtn.classList.remove('muted');
-    }
-    videoTrack.enabled = !videoTrack.enabled;
-
-    // The advanced version of this stops the track to disable and uses
-    // replaceTrack to re-enable. Not necessary in Firefox which turns
-    // off the camera light.
-    if (videoTrack.enabled == false) {
-        // Wait five seconds in case the user mutes by accident.
-        setTimeout(async () => {
-            if (videoTrack.enabled === false) {
-                videoTrack.stop();
-            }
-        }, 5000);
-    } else if (videoTrack.readyState === 'ended') {
-        // We need to restart the camera and do replaceTrack.
-        // Note that you should be using the same setting as when
-        // getting the initial track. Either store those or use
-        // track.getSettings() to get them.
-        const stream = await navigator.mediaDevices.getUserMedia({video: true});
-        const newTrack = stream.getTracks()[0];
-        replaceVideoTrack(newTrack);
-        // Pushing the new track before removing the old track avoids stopping the
-        // stream.
-        localStream.addTrack(newTrack);
-        localStream.removeTrack(videoTrack);
-    }
-});
-
-// Relatively self-contained screensharing/replaceTrack example.
+// Placeholder stream for screen sharing only mode.
 let screenShare;
-function replaceVideoTrack(withTrack) {
+let placeholderTrack;
+
+function setLocalMetadataLabel(label) {
+    Object.keys(localMetadata).forEach(k => delete localMetadata[k]);
+    if (localStream) {
+        localMetadata[localStream.id] = label;
+    }
+}
+const audioBtn = document.getElementById('audioBtn');
+const videoBtn = document.getElementById('videoBtn');
+if (audioBtn) audioBtn.style.display = 'none';
+if (videoBtn) videoBtn.style.display = 'none';
+
+function ensurePlaceholderTrack() {
+    if (!placeholderTrack) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 360;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#666';
+        ctx.font = '24px sans-serif';
+        ctx.fillText('Waiting for screen share…', 40, canvas.height / 2);
+        const stream = canvas.captureStream(1);
+        placeholderTrack = stream.getVideoTracks()[0];
+    }
+    return placeholderTrack;
+}
+
+async function replaceVideoTrack(withTrack) {
+    const trackToUse = withTrack || ensurePlaceholderTrack();
+    const promises = [];
     peers.forEach(pc => {
-        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-        if (sender) {
-            sender.replaceTrack(withTrack);
+        let sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (!sender) {
+            try {
+                sender = pc.addTrack(trackToUse, localStream || new MediaStream([trackToUse]));
+            } catch (err) {
+                console.error('Failed to add track', err);
+                return;
+            }
         }
+        promises.push(sender.replaceTrack(trackToUse).catch(e => console.error('replaceTrack failed', e)));
     });
+    await Promise.all(promises);
 }
 const shareBtn = document.getElementById('shareBtn');
-shareBtn.addEventListener('click', async () => {
-    if (screenShare) { // click-to-end.
-        screenShare.getTracks().forEach(t => t.stop());
-        screenShare = null;
-        document.getElementById('localVideo').srcObject = localStream;
-        replaceVideoTrack(localStream.getVideoTracks()[0]);
-        shareBtn.classList.remove('sharing');
-        return;
-    }
-    const stream = await navigator.mediaDevices.getDisplayMedia({video: true});
-    const track = stream.getVideoTracks()[0];
-    replaceVideoTrack(track);
-    document.getElementById('localVideo').srcObject = stream;
-    track.addEventListener('ended', () => {
-        console.log('Screensharing ended via the browser UI');
-        screenShare = null;
-        document.getElementById('localVideo').srcObject = localStream;
-        replaceVideoTrack(localStream.getVideoTracks()[0]);
-        shareBtn.classList.remove('sharing');
+if (!isSender && shareBtn) {
+    shareBtn.style.display = 'none';
+}
+if (shareBtn) {
+    shareBtn.addEventListener('click', async () => {
+        if (screenShare) { // click-to-end.
+            screenShare.getTracks().forEach(t => t.stop());
+            screenShare = null;
+            const placeholder = ensurePlaceholderTrack();
+            localStream = new MediaStream([placeholder]);
+            setLocalMetadataLabel('placeholder');
+            document.getElementById('localVideo').srcObject = localStream;
+            replaceVideoTrack(null);
+            shareBtn.classList.remove('sharing');
+            return;
+        }
+        const stream = await navigator.mediaDevices.getDisplayMedia({video: true});
+        const track = stream.getVideoTracks()[0];
+        localStream = new MediaStream([track]);
+        setLocalMetadataLabel('screen-share');
+        replaceVideoTrack(track);
+        document.getElementById('localVideo').srcObject = stream;
+        track.addEventListener('ended', () => {
+            console.log('Screensharing ended via the browser UI');
+            screenShare = null;
+            const placeholder = ensurePlaceholderTrack();
+            localStream = new MediaStream([placeholder]);
+            setLocalMetadataLabel('placeholder');
+            document.getElementById('localVideo').srcObject = localStream;
+            replaceVideoTrack(null);
+            shareBtn.classList.remove('sharing');
+        });
+        screenShare = stream;
+        shareBtn.classList.add('sharing');
+        // Here we might want to do a new signalling message that tells the other end we
+        // changed our video source.
     });
-    screenShare = stream;
-    shareBtn.classList.add('sharing');
-    // Here we might want to do a new signalling message that tells the other end we
-    // changed our video source.
-});
+}
 
 // When clicking the hangup button, any connections will be closed.
 const hangupBtn = document.getElementById('hangupButton');
@@ -165,11 +173,12 @@ let localStream; // local stream to be acquired from getUserMedia.
 let iceServers = null; // the latest iceServers we got from the signaling server.
 
 async function getUserMedia() {
-    const stream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
-    document.getElementById('localVideo').srcObject = stream;
+    const track = ensurePlaceholderTrack();
+    const stream = new MediaStream([track]);
     localStream = stream;
-    // Associate metadata with the stream id.
-    localMetadata[stream.id] = 'webcam';
+    const localVideo = document.getElementById('localVideo');
+    if (localVideo) localVideo.srcObject = stream;
+    setLocalMetadataLabel('placeholder');
     return stream;
 }
 
@@ -534,3 +543,12 @@ window.addEventListener('beforeunload', () => {
         });
     }
 });
+
+getUserMedia()
+    .then(() => connect())
+    .then(() => {
+        if (initialHash.length) {
+            call(initialHash);
+        }
+    })
+    .catch(err => console.error('Failed to initialize', err));
